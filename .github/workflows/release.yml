@@ -22,6 +22,8 @@ jobs:
             goarch: amd64
           - goos: linux
             goarch: arm64
+          - goos: linux
+            goarch: arm
           - goos: darwin
             goarch: amd64
           - goos: darwin
@@ -57,31 +59,31 @@ jobs:
           VERSION=${GITHUB_REF_NAME}
           GIT_COMMIT=${GITHUB_SHA::8}
           BUILD_TIME=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
-          
+
           OUTPUT_NAME=resin-${GOOS}-${GOARCH}
           if [ "$GOOS" = "windows" ]; then
             OUTPUT_NAME="${OUTPUT_NAME}.exe"
           fi
           echo "OUTPUT_NAME=${OUTPUT_NAME}" >> $GITHUB_ENV
-          
+
           mkdir -p build
-          
+
           go build -trimpath -tags "with_quic with_wireguard with_grpc with_utls with_embedded_tor with_naive_outbound" \
             -ldflags="-s -w \
             -X github.com/Resinat/Resin/internal/buildinfo.Version=${VERSION} \
             -X github.com/Resinat/Resin/internal/buildinfo.GitCommit=${GIT_COMMIT} \
             -X github.com/Resinat/Resin/internal/buildinfo.BuildTime=${BUILD_TIME}" \
             -o build/${OUTPUT_NAME} ./cmd/resin
-            
+
           cd build
-          
+
           # Create a copy with the simple name for the archive
           SIMPLE_NAME="resin"
           if [ "$GOOS" = "windows" ]; then
             SIMPLE_NAME="resin.exe"
           fi
           cp ${OUTPUT_NAME} ${SIMPLE_NAME}
-          
+
           if [ "$GOOS" = "windows" ]; then
             zip resin-${GOOS}-${GOARCH}.zip ${SIMPLE_NAME}
             PACKAGE_NAME="resin-${GOOS}-${GOARCH}.zip"
@@ -89,7 +91,7 @@ jobs:
             tar -czvf resin-${GOOS}-${GOARCH}.tar.gz ${SIMPLE_NAME}
             PACKAGE_NAME="resin-${GOOS}-${GOARCH}.tar.gz"
           fi
-          
+
           # Remove simple name copy to avoid confusion
           rm ${SIMPLE_NAME}
           echo "PACKAGE_NAME=${PACKAGE_NAME}" >> $GITHUB_ENV
@@ -178,8 +180,14 @@ jobs:
           name: binary-linux-arm64
           path: release-bin/linux/arm64/
 
+      - name: Download Linux arm binary
+        uses: actions/download-artifact@v4
+        with:
+          name: binary-linux-arm
+          path: release-bin/linux/arm/
+
       - name: Give binaries execute permission
-        run: chmod +x release-bin/linux/amd64/resin-linux-amd64 release-bin/linux/arm64/resin-linux-arm64
+        run: chmod +x release-bin/linux/amd64/resin-linux-amd64 release-bin/linux/arm64/resin-linux-arm64 release-bin/linux/arm/resin-linux-arm
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -219,6 +227,6 @@ jobs:
           context: .
           file: ./.github/Dockerfile.release
           push: true
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
