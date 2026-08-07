@@ -1,0 +1,139 @@
+name: Sync Upstream & Build armv7
+
+on:
+  schedule:
+    - cron: '17 2 * * *'   # UTC 02:17 ≈ 北京 10:17，错开整点
+  workflow_dispatch:       # 允许手动触发
+
+concurrency:
+  group: sync-build-armv7
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  sync:
+    name: Sync from upstream
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.detect.outputs.changed }}
+      new_sha: ${{ steps.detect.outputs.new_sha }}
+      short_sha: ${{ steps.detect.outputs.short_sha }}
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Fetch upstream & detect updates
+        id: detect
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/Resinat/Resin.git
+          git fetch upstream master
+
+          LOCAL=$(git rev-parse master)
+          UPSTREAM=$(git rev-parse upstream/master)
+          echo "local=$LOCAL upstream=$UPSTREAM"
+
+          if [ "$LOCAL" = "$UPSTREAM" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No upstream changes — skip build"
+            exit 0
+          fi
+
+          # 保留我们的 workflow 改动：先 merge 上游，冲突时优先上游代码，再 re-apply 我们的 yml
+          git checkout master
+          git merge --no-edit upstream/master || {
+            # 若冲突，对源码采上游，对 .github 采我们这边
+            git checkout --theirs . || true
+            git checkout --ours .github || true
+            git add -A
+            git commit -m "merge upstream/master (auto)" || true
+          }
+
+          # 确保 armv7 workflow 仍在
+          if ! grep -q 'linux/arm/v7' .github/workflows/release.yml 2>/dev/null; then
+            echo "WARN: armv7 platform missing after merge — will still build via this workflow"
+          fi
+
+          git push origin master
+          NEW=$(git rev-parse HEAD)
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "new_sha=$NEW" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${NEW::8}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build & push armv7 image
+    needs: sync
+    if: needs.sync.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.sync.outputs.new_sha }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build WebUI
+        working-directory: ./webui
+        run: |
+          npm ci
+          npm run build
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+
+      - name: Build linux/arm binary
+        env:
+          GOOS: linux
+          GOARCH: arm
+          GOARM: '7'
+          CGO_ENABLED: 0
+        run: |
+          VERSION=nightly-${{ needs.sync.outputs.short_sha }}
+          GIT_COMMIT=${{ needs.sync.outputs.short_sha }}
+          BUILD_TIME=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          mkdir -p release-bin/linux/arm
+          go build -trimpath -tags "with_quic with_wireguard with_grpc with_utls with_embedded_tor with_naive_outbound" \
+            -ldflags="-s -w \
+            -X github.com/Resinat/Resin/internal/buildinfo.Version=${VERSION} \
+            -X github.com/Resinat/Resin/internal/buildinfo.GitCommit=${GIT_COMMIT} \
+            -X github.com/Resinat/Resin/internal/buildinfo.BuildTime=${BUILD_TIME}" \
+            -o release-bin/linux/arm/resin-linux-arm ./cmd/resin
+          chmod +x release-bin/linux/arm/resin-linux-arm
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push armv7 image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./.github/Dockerfile.release
+          push: true
+          platforms: linux/arm/v7
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:nightly
+            ghcr.io/${{ github.repository }}:nightly-${{ needs.sync.outputs.short_sha }}
